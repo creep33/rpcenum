@@ -1,0 +1,403 @@
+#!/bin/bash
+
+#Colors
+endColour="\033[0m\e[0m"
+redColour="\e[0;31m\033[1m"
+blueColour="\e[0;34m\033[1m"
+yellowColour="\e[0;33m\033[1m"
+purpleColour="\e[0;35m\033[1m"
+grayColour="\e[0;37m\033[1m"
+
+declare -r valid_modes="DUsers DUsersInfo DAUsers DGroups PassPol DomInfo RIDCycling All"
+declare -r rid_cycling_start=500
+declare -r rid_cycling_end=2000
+declare -r batch_size=200
+
+tmp_dir=$(mktemp -d) || exit 1
+declare -r tmp_dir
+
+function cleanup(){
+
+	rm -rf "$tmp_dir"
+	tput cnorm 2>/dev/null
+}
+
+function ctrl_c(){
+
+	echo -e "\n${yellowColour}[*]${endColour}${grayColour} Exiting...${endColour}"
+	exit 1
+}
+
+trap cleanup EXIT
+trap ctrl_c INT
+
+function helpPanel(){
+
+	echo -e "\n${yellowColour}[*]${endColour}${grayColour} Usage: rpcenum -e <mode> -i <host> [-u <username> [-p <password> | -H <nt_hash>]] [-d <domain>] [-o <file>]${endColour}"
+	echo -e "\n\t${purpleColour}-e)${endColour}${yellowColour} Enumeration Mode${endColour}${redColour} (required)${endColour}"
+	echo -e "\n\t\t${grayColour}DUsers${endColour}${redColour} (Domain Users)${endColour}"
+	echo -e "\t\t${grayColour}DUsersInfo${endColour}${redColour} (Domain Users with description)${endColour}"
+	echo -e "\t\t${grayColour}DAUsers${endColour}${redColour} (Domain Admin Users)${endColour}"
+	echo -e "\t\t${grayColour}DGroups${endColour}${redColour} (Domain Groups with description)${endColour}"
+	echo -e "\t\t${grayColour}PassPol${endColour}${redColour} (Password and lockout policy)${endColour}"
+	echo -e "\t\t${grayColour}DomInfo${endColour}${redColour} (Domain information and SID)${endColour}"
+	echo -e "\t\t${grayColour}RIDCycling${endColour}${redColour} (Users and groups by RID ${rid_cycling_start}-${rid_cycling_end}, works when enumdomusers is denied)${endColour}"
+	echo -e "\t\t${grayColour}All${endColour}${redColour} (All modes except RIDCycling)${endColour}"
+	echo -e "\n\t${purpleColour}-i)${endColour}${yellowColour} Host IP Address or hostname${endColour}${redColour} (required)${endColour}"
+	echo -e "\n\t${purpleColour}-u)${endColour}${yellowColour} Username${endColour}${redColour} (optional, Null Session if omitted)${endColour}"
+	echo -e "\n\t${purpleColour}-p)${endColour}${yellowColour} Password${endColour}${redColour} (optional, requires -u)${endColour}"
+	echo -e "\n\t${purpleColour}-H)${endColour}${yellowColour} NT hash for Pass-the-Hash${endColour}${redColour} (optional, requires -u, LM:NT accepted)${endColour}"
+	echo -e "\n\t${purpleColour}-d)${endColour}${yellowColour} Domain${endColour}${redColour} (optional)${endColour}"
+	echo -e "\n\t${purpleColour}-o)${endColour}${yellowColour} Save output to file without colours${endColour}${redColour} (optional)${endColour}"
+	echo -e "\n\t${purpleColour}-h)${endColour}${yellowColour} Show this help panel${endColour}"
+	echo -e "\n${yellowColour}[*]${endColour}${grayColour} Examples:${endColour}"
+	echo -e "\n\t${grayColour}rpcenum -e All -i 10.10.10.10${endColour}${redColour} (Null Session)${endColour}"
+	echo -e "\t${grayColour}rpcenum -e DUsers -i 10.10.10.10 -u 'user' -p 'password' -d CORP${endColour}${redColour} (Authenticated)${endColour}"
+	echo -e "\t${grayColour}rpcenum -e DAUsers -i 10.10.10.10 -u 'user' -H 'aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0'${endColour}${redColour} (Pass-the-Hash)${endColour}\n"
+	exit "${1:-1}"
+}
+
+function errorMsg(){
+
+	printf "\n${redColour}[!] %s${endColour}\n" "$1"
+}
+
+function warningMsg(){
+
+	printf "${yellowColour}[!]${endColour}${grayColour} %s${endColour}\n" "$1"
+}
+
+function infoMsg(){
+
+	printf "\n${yellowColour}[*]${endColour}${grayColour} %s${endColour}\n\n" "$1"
+}
+
+function rpc(){
+
+	rpcclient "${rpc_args[@]}" "$host_ip" "$@"
+}
+
+function rpcError(){
+
+	# First NT_STATUS error found in rpcclient output, if any
+	grep -oE 'NT_STATUS_[A-Z_]+' <<< "$1" | grep -vE 'NT_STATUS_(OK|SOME_NOT_MAPPED|NONE_MAPPED)' | head -n 1
+}
+
+function rpcBatch(){
+
+	# Runs "<command> <arg>" for every argument, $batch_size per rpcclient connection
+	local -r command="$1"; shift
+	local -a args=("$@")
+	local i commands
+
+	for ((i = 0; i < ${#args[@]}; i += batch_size)); do
+		commands=$(printf "$command %s;" "${args[@]:i:batch_size}")
+		rpc -c "$commands" 2>&1
+	done
+}
+
+function printTable(){
+
+	# Prints tab separated rows (first row is the header) as a table
+	local -r data="$(sed '/^[[:space:]]*$/d' <<< "$1")"
+
+	if [ "$(wc -l <<< "$data")" -le 1 ]; then
+		warningMsg "No results"
+		return
+	fi
+
+	echo -ne "${blueColour}"
+	awk -F '\t' '
+		function separator(   i, line){
+			line = "+"
+			for (i = 1; i <= columns; i++) line = line sprintf("%" (width[i] + 2) "s+", "")
+			gsub(" ", "-", line); print line
+		}
+		{
+			for (i = 1; i <= NF; i++) { cell[NR, i] = $i; if (length($i) > width[i]) width[i] = length($i) }
+			if (NF > columns) columns = NF
+		}
+		END {
+			separator()
+			for (row = 1; row <= NR; row++) {
+				line = "|"
+				for (i = 1; i <= columns; i++) line = line sprintf(" %-" width[i] "s |", cell[row, i])
+				print line
+				if (row == 1) separator()
+			}
+			separator()
+		}' <<< "$data"
+	echo -ne "${endColour}"
+}
+
+function printKeyValues(){
+
+	# Turns "Key: value" lines from rpcclient into table rows, flags without value go under $1
+	awk -v flag_key="$1" '
+		/NT_STATUS|result was|command not found/ { next }
+		/:/ {
+			key = $0; sub(/:.*/, "", key)
+			value = $0; sub(/^[^:]*:/, "", value)
+			gsub(/^[ \t]+|[ \t]+$/, "", key); gsub(/^[ \t]+|[ \t]+$/, "", value)
+			if (key != "") print key "\t" value
+			next
+		}
+		/^[ \t]*[A-Z_]+[ \t]*$/ { gsub(/[ \t]/, ""); print flag_key "\t" $0 }'
+}
+
+function getDomainUsers(){
+
+	# Fills domain_users (name<TAB>rid lines) once per run
+	[ -n "$domain_users_loaded" ] && return
+
+	local -r output=$(rpc -c "enumdomusers" 2>&1)
+	domain_users=$(sed -nE 's/^user:\[(.*)\] rid:\[(0x[0-9a-fA-F]+)\]$/\1\t\2/p' <<< "$output")
+	domain_users_error=$(rpcError "$output")
+	domain_users_loaded=1
+}
+
+function queryUserField(){
+
+	# Prints "User Name<TAB><field>" for every RID passed, skipping empty fields when $1 is "skip_empty"
+	local -r skip_empty="$1"; shift
+
+	rpcBatch "queryuser" "$@" | awk -v skip_empty="$skip_empty" '
+		function value(line){ sub(/^[^:]*:[ \t]*/, "", line); sub(/[ \t]+$/, "", line); return line }
+		/^[ \t]*User Name[ \t]*:/ { name = value($0) }
+		/^[ \t]*Description[ \t]*:/ {
+			description = value($0)
+			if (!(skip_empty && description == "")) print name "\t" description
+		}'
+}
+
+function extract_DUsers(){
+
+	infoMsg "Enumerating Domain Users..."
+	getDomainUsers
+
+	[ -n "$domain_users_error" ] && warningMsg "rpcclient returned $domain_users_error"
+	printTable "$(echo -e "User\tRID"; echo "$domain_users")"
+}
+
+function extract_DUsers_Info(){
+
+	infoMsg "Listing domain users with description..."
+	getDomainUsers
+
+	if [ -z "$domain_users" ]; then
+		warningMsg "No domain users found${domain_users_error:+ ($domain_users_error)}"
+		return
+	fi
+
+	local -a rids
+	mapfile -t rids < <(cut -f 2 <<< "$domain_users")
+
+	printTable "$(echo -e "User\tDescription"; queryUserField skip_empty "${rids[@]}")"
+}
+
+function extract_DAUsers(){
+
+	infoMsg "Enumerating Domain Admin Users..."
+
+	# 0x200 is the well-known RID of Domain Admins, valid on any DC language
+	local -r output=$(rpc -c "querygroupmem 0x200" 2>&1)
+	local -a rids
+	mapfile -t rids < <(sed -nE 's/^[[:space:]]*rid:\[(0x[0-9a-fA-F]+)\].*/\1/p' <<< "$output")
+
+	if [ ${#rids[@]} -eq 0 ]; then
+		local -r error=$(rpcError "$output")
+		warningMsg "No Domain Admins found${error:+ ($error)}"
+		return
+	fi
+
+	printTable "$(echo -e "DomainAdminUser\tDescription"; queryUserField "" "${rids[@]}")"
+}
+
+function extract_DGroups(){
+
+	infoMsg "Enumerating Domain Groups..."
+
+	local -r output=$(rpc -c "enumdomgroups" 2>&1)
+	local -a rids
+	mapfile -t rids < <(sed -nE 's/^group:\[.*\] rid:\[(0x[0-9a-fA-F]+)\]$/\1/p' <<< "$output")
+
+	if [ ${#rids[@]} -eq 0 ]; then
+		local -r error=$(rpcError "$output")
+		warningMsg "No domain groups found${error:+ ($error)}"
+		return
+	fi
+
+	printTable "$(echo -e "DomainGroup\tDescription"; rpcBatch "querygroup" "${rids[@]}" | awk '
+		function value(line){ sub(/^[^:]*:[ \t]*/, "", line); sub(/[ \t]+$/, "", line); return line }
+		/^[ \t]*Group Name[ \t]*:/ { name = value($0) }
+		/^[ \t]*Description[ \t]*:/ { print name "\t" value($0) }')"
+}
+
+function extract_PassPol(){
+
+	infoMsg "Enumerating Password Policy..."
+
+	local -r output=$(rpc -c "querydominfo 1;querydominfo 12" 2>&1)
+	local -r error=$(rpcError "$output")
+
+	[ -n "$error" ] && warningMsg "rpcclient returned $error"
+	printTable "$(echo -e "Policy\tValue"; printKeyValues "Password Property" <<< "$output")"
+}
+
+function extract_DomInfo(){
+
+	infoMsg "Enumerating Domain Information..."
+
+	local -r output=$(rpc -c "lsaquery;querydominfo" 2>&1)
+	local -r error=$(rpcError "$output")
+
+	[ -n "$error" ] && warningMsg "rpcclient returned $error"
+	printTable "$(echo -e "Field\tValue"; printKeyValues "Flag" <<< "$output")"
+}
+
+function extract_RIDCycling(){
+
+	infoMsg "RID Cycling from ${rid_cycling_start} to ${rid_cycling_end}..."
+
+	local -r output=$(rpc -c "lsaquery" 2>&1)
+	local -r domain_sid=$(grep -oE 'S-1-5-21(-[0-9]+){3}' <<< "$output" | head -n 1)
+
+	if [ -z "$domain_sid" ]; then
+		local -r error=$(rpcError "$output")
+		warningMsg "Could not get the domain SID${error:+ ($error)}"
+		return
+	fi
+
+	local -a sids
+	mapfile -t sids < <(seq "$rid_cycling_start" "$rid_cycling_end" | sed "s/^/${domain_sid}-/")
+
+	printTable "$(echo -e "Name\tType\tRID"; rpcBatch "lookupsids" "${sids[@]}" | awk '
+		BEGIN { split("User Group Domain Alias WellKnownGroup Deleted Invalid Unknown Computer", types, " ") }
+		match($0, /^S-1-5-21(-[0-9]+)+ /) {
+			sid = substr($0, 1, RLENGTH - 1); rid = sid; sub(/.*-/, "", rid)
+			rest = substr($0, RLENGTH + 1)
+			type = rest; sub(/.*\(/, "", type); sub(/\).*/, "", type)
+			name = rest; sub(/ \([0-9]+\)$/, "", name)
+			if (name ~ /\*unknown\*/) next
+			print name "\t" (type in types ? types[type] : type) "\t" rid
+		}')"
+}
+
+function extract_All(){
+
+	extract_DomInfo
+	extract_PassPol
+	extract_DUsers
+	extract_DUsers_Info
+	extract_DAUsers
+	extract_DGroups
+}
+
+function checkPort(){
+
+	timeout 2 bash -c 'exec 3<>"/dev/tcp/$0/$1"' "$host_ip" "$1" 2>/dev/null
+}
+
+function beginEnumeration(){
+
+	tput civis 2>/dev/null
+
+	if ! checkPort 445 && ! checkPort 139; then
+		errorMsg "Ports 445 and 139 seem to be closed on $host_ip"
+		exit 1
+	fi
+
+	local output error
+
+	if ! output=$(rpc -c "getusername" 2>&1); then
+		error=$(rpcError "$output")
+		errorMsg "Could not connect to $host_ip: ${error:-$(tail -n 1 <<< "$output")}"
+		exit 1
+	fi
+
+	"extract_${enum_mode}"
+}
+
+function checkDependencies(){
+
+	local dependency missing=""
+
+	for dependency in rpcclient awk sed timeout mktemp; do
+		command -v "$dependency" > /dev/null 2>&1 || missing="$missing $dependency"
+	done
+
+	if [ -n "$missing" ]; then
+		errorMsg "Missing dependencies:$missing"
+		exit 1
+	fi
+}
+
+function buildAuthentication(){
+
+	if [ -z "$username" ]; then
+		rpc_args=(-U "" -N)
+	elif [ -z "$password" ] && [ -z "$nt_hash" ]; then
+		rpc_args=(-U "$username" -N)
+		[ -n "$domain" ] && rpc_args+=(-W "$domain")
+	else
+		# Credentials go in a private auth file so they don't show up in ps
+		local -r auth_file="$tmp_dir/auth"
+		{
+			echo "username = $username"
+			echo "password = ${nt_hash:-$password}"
+			[ -n "$domain" ] && echo "domain = $domain"
+		} > "$auth_file"
+		chmod 600 "$auth_file"
+
+		# --pw-nt-hash must go before -A so the password read from the file is taken as a hash
+		rpc_args=(-A "$auth_file")
+		[ -n "$nt_hash" ] && rpc_args=(--pw-nt-hash "${rpc_args[@]}")
+	fi
+}
+
+# Main Function
+
+while getopts ":e:i:u:p:H:d:o:h" arg; do
+	case $arg in
+		e) enum_mode=$OPTARG;;
+		i) host_ip=$OPTARG;;
+		u) username=$OPTARG;;
+		p) password=$OPTARG;;
+		H) nt_hash=${OPTARG##*:};;
+		d) domain=$OPTARG;;
+		o) output_file=$OPTARG;;
+		h) helpPanel 0;;
+		:) errorMsg "Option -$OPTARG requires a value"; helpPanel;;
+		\?) errorMsg "Invalid option: -$OPTARG"; helpPanel;;
+	esac
+done
+
+if [ -z "$enum_mode" ] || [ -z "$host_ip" ]; then
+	helpPanel
+elif [[ " $valid_modes " != *" $enum_mode "* ]]; then
+	errorMsg "Invalid enumeration mode: $enum_mode"; helpPanel
+elif [[ ! "$host_ip" =~ ^[A-Za-z0-9.:-]+$ ]]; then
+	errorMsg "Invalid host: $host_ip"; exit 1
+elif [[ ( -n "$password" || -n "$nt_hash" ) && -z "$username" ]]; then
+	errorMsg "-p and -H require -u"; helpPanel
+elif [ -n "$password" ] && [ -n "$nt_hash" ]; then
+	errorMsg "-p and -H cannot be used together"; helpPanel
+elif [ -n "$nt_hash" ] && [[ ! "$nt_hash" =~ ^[0-9a-fA-F]{32}$ ]]; then
+	errorMsg "Invalid NT hash, expected 32 hex characters"; exit 1
+fi
+
+checkDependencies
+buildAuthentication
+
+if [ -n "$output_file" ]; then
+	if ! : 2>/dev/null > "$output_file"; then
+		errorMsg "Cannot write to $output_file"; exit 1
+	fi
+
+	beginEnumeration | tee "$tmp_dir/output"
+	exit_code=${PIPESTATUS[0]}
+	sed -E 's/\x1b\[[0-9;?]*[a-zA-Z]//g' "$tmp_dir/output" > "$output_file" && infoMsg "Output saved to $output_file"
+	exit "$exit_code"
+fi
+
+beginEnumeration
