@@ -1,17 +1,17 @@
 # rpcenum
 
-Herramienta en Bash para enumerar un dominio Active Directory a través de RPC (`rpcclient`), con sesión nula o con credenciales.
+Bash tool to enumerate an Active Directory domain over RPC (`rpcclient`), using a null session or credentials.
 
-Basada en [rpcenum](https://github.com/s4vitar/rpcenum) de Marcelo Vázquez (S4vitar).
+Based on [rpcenum](https://github.com/s4vitar/rpcenum) by Marcelo Vázquez (S4vitar).
 
-## Requisitos
+## Requirements
 
-- `rpcclient` (paquete `smbclient` / `samba-common-bin`)
-- `awk`, `sed`, `timeout`, `mktemp` (incluidos en cualquier distribución Linux)
+- `rpcclient` (package `smbclient` / `samba-common-bin`)
+- `awk`, `sed`, `timeout`, `mktemp` (included in any Linux distribution)
 
-No necesita root.
+Root is not required.
 
-## Instalación
+## Installation
 
 ```bash
 git clone https://github.com/creep33/rpcenum
@@ -19,48 +19,48 @@ cd rpcenum
 chmod +x rpcenum
 ```
 
-## Uso
+## Usage
 
 ```bash
-./rpcenum -e <modo> -i <host> [-u <usuario> [-p <contraseña> | -H <hash_nt>]] [-d <dominio>] [-o <fichero>]
+./rpcenum -e <mode> -i <host> [-u <username> [-p <password> | -H <nt_hash>]] [-d <domain>] [-o <file>]
 ```
 
-| Opción | Descripción |
+| Option | Description |
 |--------|-------------|
-| `-e` | Modo de enumeración (obligatorio) |
-| `-i` | IP o hostname del controlador de dominio (obligatorio) |
-| `-u` | Usuario. Si se omite, se usa sesión nula |
-| `-p` | Contraseña (requiere `-u`) |
-| `-H` | Hash NT para Pass-the-Hash (requiere `-u`, acepta formato `LM:NT`) |
-| `-d` | Dominio |
-| `-o` | Guarda la salida en un fichero, sin colores |
-| `-h` | Muestra la ayuda |
+| `-e` | Enumeration mode (required) |
+| `-i` | Domain controller IP or hostname (required) |
+| `-u` | Username. A null session is used if omitted |
+| `-p` | Password (requires `-u`) |
+| `-H` | NT hash for Pass-the-Hash (requires `-u`, `LM:NT` format accepted) |
+| `-d` | Domain |
+| `-o` | Save the output to a file, without colours |
+| `-h` | Show the help panel |
 
-### Modos
+### Modes
 
-| Modo | Qué obtiene |
-|------|-------------|
-| `DUsers` | Usuarios del dominio y su RID |
-| `DUsersInfo` | Usuarios con descripción (a menudo contienen contraseñas) |
-| `DAUsers` | Miembros de Domain Admins |
-| `DGroups` | Grupos del dominio con descripción |
-| `PassPol` | Política de contraseñas y bloqueo de cuentas |
-| `DomInfo` | Información del dominio y su SID |
-| `RIDCycling` | Usuarios y grupos por fuerza bruta de RID (500-2000), útil cuando `enumdomusers` está denegado |
-| `All` | Todos los modos excepto `RIDCycling` |
+| Mode | What it gets |
+|------|--------------|
+| `DUsers` | Domain users and their RID |
+| `DUsersInfo` | Users with a description (descriptions often contain passwords) |
+| `DAUsers` | Members of Domain Admins |
+| `DGroups` | Domain groups with their description |
+| `PassPol` | Password and account lockout policy |
+| `DomInfo` | Domain information and SID |
+| `RIDCycling` | Users and groups found by RID brute force (500-2000), useful when `enumdomusers` is denied |
+| `All` | All modes except `RIDCycling` |
 
-## Ejemplos
+## Examples
 
-Sesión nula:
+Null session:
 
 ```bash
 ./rpcenum -e All -i 10.10.10.10
 ```
 
-Con credenciales:
+With credentials:
 
 ```bash
-./rpcenum -e DUsersInfo -i 10.10.10.10 -u 'usuario' -p 'contraseña' -d CORP
+./rpcenum -e DUsersInfo -i 10.10.10.10 -u 'user' -p 'password' -d CORP
 ```
 
 Pass-the-Hash:
@@ -69,17 +69,17 @@ Pass-the-Hash:
 ./rpcenum -e DAUsers -i 10.10.10.10 -u 'administrator' -H '31d6cfe0d16ae931b73c59d7e0c089c0'
 ```
 
-Guardar la salida:
+Save the output:
 
 ```bash
-./rpcenum -e All -i 10.10.10.10 -o resultados.txt
+./rpcenum -e All -i 10.10.10.10 -o results.txt
 ```
 
-## Notas
+## Notes
 
-- Las credenciales se pasan a `rpcclient` mediante un fichero temporal con permisos `600`, así no aparecen en la lista de procesos (`ps`).
-- Úsala solo contra sistemas para los que tengas autorización.
+- Credentials are passed to `rpcclient` through a temporary file with `600` permissions, so they don't show up in the process list (`ps`).
+- Only use it against systems you are authorised to test.
 
-## Licencia
+## License
 
-GPL-3.0, igual que el proyecto original.
+GPL-3.0, same as the original project.
